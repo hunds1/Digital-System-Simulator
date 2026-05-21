@@ -1,0 +1,10 @@
+export { Badge } from './Badge'
+export { Button } from './Button'
+export { Card } from './Card'
+export { Input } from './Input'
+export { Modal } from './Modal'
+export { Select } from './Select'
+export { Slider } from './Slider'
+export { Tabs } from './Tabs'
+export { ToastProvider, useToast } from './Toast'  //сомнительно но допустим я добавлю
+export type { TabItem } from './Tabs'
