@@ -47,7 +47,9 @@ export const ToastProvider = ({ children }: PropsWithChildren) => {
 
   const showToast = useCallback(
     ({ title, description, variant = 'info' }: ShowToastArgs) => {
-      const id = crypto.randomUUID()
+      const id = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+        ? crypto.randomUUID()
+        : `toast-${Math.random().toString(36).slice(2)}-${Date.now()}`
       setToasts((prev) => [...prev, { id, title, description, variant }])
       window.setTimeout(() => hideToast(id), 5000)
     },

@@ -10,7 +10,6 @@ import ReactFlow, {
   addEdge,
   useEdgesState,
   useNodesState,
-  useReactFlow,
   type Connection,
   type Edge,
   type Node,
@@ -83,6 +82,12 @@ const initialEdges: LogisticsEdge[] = [
 const nodeTypes = { point: PointNode, warehouse: WarehouseNode, truck: TruckNode }
 const edgeTypes = { route: RouteEdge, truckGuidance: TruckGuidanceEdge }
 
+const isValidSchema = (schema: SchemaPayload | undefined): schema is SchemaPayload =>
+  typeof schema === 'object' &&
+  schema !== null &&
+  Array.isArray(schema.nodes) &&
+  Array.isArray(schema.edges)
+
 const isValidRoute = (sourceType?: string, targetType?: string) => {
   if (!sourceType || !targetType) return false
   return (
@@ -110,7 +115,7 @@ const ConstructorCanvas = () => {
   const [selectedSchemaIndex, setSelectedSchemaIndex] = useState('0')
   const importInputRef = useRef<HTMLInputElement | null>(null)
   const { showToast } = useToast()
-  const reactFlow = useReactFlow()
+  const reactFlowInstance = useRef<any>(null)
   const queryClient = useQueryClient()
 
   const schemaOptions = useMemo(
@@ -143,8 +148,38 @@ const ConstructorCanvas = () => {
     [isSimulationActive],
   )
 
+  const loadFromLocal = useCallback(() => {
+    const raw = localStorage.getItem('logistics-schema')
+    if (!raw) {
+      showToast({ variant: 'error', title: 'Нет сохраненной схемы' })
+      return
+    }
+
+    try {
+      const local = JSON.parse(raw) as Snapshot
+      pushSnapshot()
+      setNodes(local.nodes)
+      setEdges(updateEdgeSimulationFlag(local.edges))
+      showToast({ variant: 'info', title: 'Схема загружена из localStorage' })
+    } catch {
+      showToast({ variant: 'error', title: 'Не удалось загрузить локальную схему' })
+    }
+  }, [pushSnapshot, setEdges, setNodes, showToast, updateEdgeSimulationFlag])
+
   const applySchema = useCallback(
-    (schema: SchemaPayload, source: 'API' | 'local' = 'API') => {
+    (schema: SchemaPayload | undefined, source: 'API' | 'local' = 'API') => {
+      if (!isValidSchema(schema)) {
+        showToast({
+          variant: 'error',
+          title: 'Некорректный формат схемы',
+          description: source === 'API' ? 'Ответ от сервера не содержит узлы и ребра.' : undefined,
+        })
+        if (source === 'API') {
+          loadFromLocal()
+        }
+        return
+      }
+
       pushSnapshot()
       setNodes(
         schema.nodes.map((node) => ({
@@ -167,26 +202,8 @@ const ConstructorCanvas = () => {
       )
       showToast({ variant: 'success', title: `Схема загружена ${source === 'API' ? 'из API' : 'из localStorage'}` })
     },
-    [pushSnapshot, setEdges, setNodes, showToast, updateEdgeSimulationFlag],
+    [loadFromLocal, pushSnapshot, setEdges, setNodes, showToast, updateEdgeSimulationFlag],
   )
-
-  const loadFromLocal = useCallback(() => {
-    const raw = localStorage.getItem('logistics-schema')
-    if (!raw) {
-      showToast({ variant: 'error', title: 'Нет сохраненной схемы' })
-      return
-    }
-
-    try {
-      const local = JSON.parse(raw) as Snapshot
-      pushSnapshot()
-      setNodes(local.nodes)
-      setEdges(updateEdgeSimulationFlag(local.edges))
-      showToast({ variant: 'info', title: 'Схема загружена из localStorage' })
-    } catch {
-      showToast({ variant: 'error', title: 'Не удалось загрузить локальную схему' })
-    }
-  }, [pushSnapshot, setEdges, setNodes, showToast, updateEdgeSimulationFlag])
 
   const schemasQuery = useQuery({
     queryKey: ['schemas'],
@@ -195,14 +212,21 @@ const ConstructorCanvas = () => {
   })
 
   useEffect(() => {
-    if (schemasQuery.data) {
-      setSavedSchemas(schemasQuery.data)
-      if (schemasQuery.data.length) {
+    if (!Array.isArray(schemasQuery.data)) {
+      return
+    }
+
+    setSavedSchemas(schemasQuery.data)
+    if (schemasQuery.data.length) {
+      const first = schemasQuery.data[0]
+      if (isValidSchema(first)) {
         setSelectedSchemaIndex('0')
-        applySchema(schemasQuery.data[0], 'API')
+        applySchema(first, 'API')
       } else {
         loadFromLocal()
       }
+    } else {
+      loadFromLocal()
     }
   }, [schemasQuery.data, applySchema, loadFromLocal])
 
@@ -252,10 +276,11 @@ const ConstructorCanvas = () => {
     if (savedSchemas.length) {
       const index = Math.min(savedSchemas.length - 1, Math.max(0, Number(selectedSchemaIndex)))
       const schema = savedSchemas[index]
-      if (schema) {
+      if (isValidSchema(schema)) {
         applySchema(schema, 'API')
         return
       }
+      showToast({ variant: 'warning', title: 'Выбранная схема недействительна', description: 'Загружается схема из localStorage.' })
     }
 
     if (isSchemasLoading) {
@@ -383,10 +408,8 @@ const ConstructorCanvas = () => {
       if (!nodeType || !wrapperRef.current) return
 
       const bounds = wrapperRef.current.getBoundingClientRect()
-      const position = reactFlow.screenToFlowPosition({
-        x: event.clientX - bounds.left,
-        y: event.clientY - bounds.top,
-      })
+      const rawPosition = { x: event.clientX - bounds.left, y: event.clientY - bounds.top }
+      const position = reactFlowInstance.current?.project(rawPosition) ?? rawPosition
 
       const id = `${nodeType}-${nodeCountRef.current++}`
       const newNode: LogisticsNode = {
@@ -405,7 +428,7 @@ const ConstructorCanvas = () => {
       setNodes((current) => [...current, newNode])
       showToast({ variant: 'info', title: 'Элемент добавлен на холст' })
     },
-    [pushSnapshot, reactFlow, setNodes, showToast],
+    [pushSnapshot, setNodes, showToast],
   )
 
   const onDragStart = useCallback((event: DragEvent<HTMLButtonElement>, nodeType: LogisticsNodeType) => {
@@ -642,9 +665,9 @@ const ConstructorCanvas = () => {
       <ElementsSidebar onDragStart={onDragStart} />
       <div className="relative flex flex-1 flex-col">
         <CanvasToolbar
-          onZoomIn={() => reactFlow.zoomIn()}
-          onZoomOut={() => reactFlow.zoomOut()}
-          onFitView={() => reactFlow.fitView({ padding: 0.2 })}
+          onZoomIn={() => reactFlowInstance.current?.zoomIn()}
+          onZoomOut={() => reactFlowInstance.current?.zoomOut()}
+          onFitView={() => reactFlowInstance.current?.fitView({ padding: 0.2 })}
           onUndo={handleUndo}
           onRedo={handleRedo}
           onSave={saveSchema}
@@ -690,6 +713,9 @@ const ConstructorCanvas = () => {
             isValidConnection={validateConnection}
             connectionMode={ConnectionMode.Loose}
             connectionLineStyle={connectionLineStyle}
+            onInit={(instance) => {
+              reactFlowInstance.current = instance
+            }}
           >
             <Background color="#1e293b" gap={20} size={1.5} />
             <MiniMap
