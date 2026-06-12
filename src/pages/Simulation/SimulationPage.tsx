@@ -1,6 +1,6 @@
 import { Dices, RefreshCcw, Save, Settings2 } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
-import { Badge, Button, Card, Input, Modal, Select, Slider } from '../../components/ui'
+import { Badge, Button, Card, HelpTooltip, Input, Modal, Select, Slider } from '../../components/ui'
 
 type DistanceDistribution = 'uniform' | 'normal' | 'poisson'
 type OptimizationType = 'cost' | 'profit'
@@ -95,6 +95,88 @@ const Toggle = ({
     </button>
   </label>
 )
+
+const getSchemaPoints = () => {
+  const raw = localStorage.getItem('logistics-schema')
+  if (!raw) return []
+
+  try {
+    const parsed = JSON.parse(raw) as { nodes?: Array<Record<string, any>> } | Array<Record<string, any>>
+    const nodes = Array.isArray(parsed) ? parsed : Array.isArray(parsed.nodes) ? parsed.nodes : []
+
+    return nodes
+      .filter((node) => typeof node?.type === 'string')
+      .filter((node) => ['point', 'warehouse', 'Point', 'Warehouse'].includes(node.type))
+      .map((node) => {
+        const normalizedType = String(node.type).toLowerCase()
+        const type = normalizedType === 'warehouse' ? 'warehouse' : 'point'
+
+        return {
+          id: String(node.id ?? ''),
+          type: type as 'point' | 'warehouse',
+          label: node?.data?.label ?? node.id ?? 'Без названия',
+          orders: typeof node?.data?.orders === 'number' ? node.data.orders : undefined,
+          status: node?.data?.status,
+        }
+      })
+  } catch {
+    return []
+  }
+}
+
+const SchemaPointsList = () => {
+  const [items, setItems] = useState<Array<{
+    id: string
+    type: 'point' | 'warehouse'
+    label: string
+    orders?: number
+    status?: string
+  }>>([])
+  const [isExpanded, setIsExpanded] = useState(false)
+
+  useEffect(() => {
+    setItems(getSchemaPoints())
+  }, [])
+
+  const visibleItems = isExpanded || items.length <= 10 ? items : items.slice(0, 10)
+
+  return (
+    <Card variant="glass" title={`Пункты схемы (${items.length})`} className="space-y-4">
+      {items.length === 0 ? (
+        <p className="text-sm text-slate-400">Нет данных</p>
+      ) : (
+        <div className="space-y-3">
+          {visibleItems.map((item) => (
+            <div key={item.id} className="rounded-xl border border-surface-700 bg-surface-900/80 p-3">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <p className="text-sm font-semibold text-slate-100">{item.label}</p>
+                  <p className="text-xs text-slate-500">{item.type === 'warehouse' ? 'Склад' : 'Пункт'}</p>
+                </div>
+                <div className="flex flex-wrap gap-2 text-xs">
+                  {item.orders !== undefined && (
+                    <span className="rounded-full bg-surface-800 px-2 py-1 text-slate-300">Заказы: {item.orders}</span>
+                  )}
+                  <span className="rounded-full bg-surface-800 px-2 py-1 text-slate-300">Статус: {item.status ?? '—'}</span>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {items.length > 10 && (
+        <button
+          type="button"
+          className="text-sm text-primary-300 hover:text-primary-200"
+          onClick={() => setIsExpanded((prev) => !prev)}
+        >
+          {isExpanded ? 'Свернуть список' : `Показать все (${items.length})`}
+        </button>
+      )}
+    </Card>
+  )
+}
 
 export const SimulationPage = () => {
   const [config, setConfig] = useState<SimulationConfig>(defaults)
@@ -232,6 +314,8 @@ export const SimulationPage = () => {
         </Card>
       )}
 
+      <SchemaPointsList />
+
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-5">
         <div className="space-y-4 xl:col-span-3">
           <Card variant="glass" title="📦 Логистика" hoverable={false} className="space-y-4">
@@ -285,29 +369,62 @@ export const SimulationPage = () => {
           </Card>
 
           <Card variant="glass" title="💰 Экономика" hoverable={false} className="space-y-4 border-primary-500/60">
-            <Input label="Стоимость перевозки (у.е./плечо)" type="number" step={0.1} value={config.transportCost} onChange={(e) => update('transportCost', Number(e.target.value))} />
-            <Input label="Затраты на перевозку" type="number" step={0.1} value={config.transportExpenses} onChange={(e) => update('transportExpenses', Number(e.target.value))} />
-            <Input label="Порожний пробег" type="number" step={0.1} value={config.emptyMileage} onChange={(e) => update('emptyMileage', Number(e.target.value))} />
-            <Input
-              label="Операция погрузки"
-              type="number"
-              step={0.1}
-              value={config.loadingOperationCost}
-              onChange={(e) => update('loadingOperationCost', Number(e.target.value))}
-            />
-            <Select
-              value={config.optimizationType}
-              options={[
-                { value: 'cost', label: 'Минимизация затрат' },
-                { value: 'profit', label: 'Максимизация прибыли' },
-              ]}
-              onChange={(value) => update('optimizationType', value as OptimizationType)}
-            />
+            <div className="space-y-2">
+              <div className="flex items-center justify-between gap-2 text-sm text-slate-300">
+                <span>Стоимость перевозки (у.е./плечо)</span>
+                <HelpTooltip text="Стоимость перевозки 1 заказа по 1 плечу (усл. ед.)" />
+              </div>
+              <Input type="number" step={0.1} value={config.transportCost} onChange={(e) => update('transportCost', Number(e.target.value))} />
+            </div>
+
+            <div className="space-y-2">
+              <div className="flex items-center justify-between gap-2 text-sm text-slate-300">
+                <span>Затраты на перевозку</span>
+                <HelpTooltip text="Дополнительные эксплуатационные расходы на перевозку в расчёте на плечо." />
+              </div>
+              <Input type="number" step={0.1} value={config.transportExpenses} onChange={(e) => update('transportExpenses', Number(e.target.value))} />
+            </div>
+
+            <div className="space-y-2">
+              <div className="flex items-center justify-between gap-2 text-sm text-slate-300">
+                <span>Порожний пробег</span>
+                <HelpTooltip text="Расстояние, которое грузовик проходит пустым, в условных единицах на плечо." />
+              </div>
+              <Input type="number" step={0.1} value={config.emptyMileage} onChange={(e) => update('emptyMileage', Number(e.target.value))} />
+            </div>
+
+            <div className="space-y-2">
+              <p className="text-sm text-slate-300">Операция погрузки</p>
+              <Input
+                type="number"
+                step={0.1}
+                value={config.loadingOperationCost}
+                onChange={(e) => update('loadingOperationCost', Number(e.target.value))}
+              />
+            </div>
+
+            <div className="space-y-2">
+              <div className="flex items-center justify-between gap-2 text-sm text-slate-300">
+                <span>Оптимизация</span>
+                <HelpTooltip text="cost — минимизация затрат, profit — максимизация прибыли." />
+              </div>
+              <Select
+                value={config.optimizationType}
+                options={[
+                  { value: 'cost', label: 'Минимизация затрат' },
+                  { value: 'profit', label: 'Максимизация прибыли' },
+                ]}
+                onChange={(value) => update('optimizationType', value as OptimizationType)}
+              />
+            </div>
           </Card>
 
           <Card variant="glass" title="🤖 Поведение системы" hoverable={false} className="space-y-4">
             <div className="space-y-2">
-              <p className="text-sm text-slate-300">Режим</p>
+              <div className="flex items-center justify-between gap-2 text-sm text-slate-300">
+                <span>Режим</span>
+                <HelpTooltip text="strict — жёсткий план, multiagent — агенты договариваются и адаптируются." />
+              </div>
               <div className="grid grid-cols-2 gap-2">
                 <button
                   type="button"

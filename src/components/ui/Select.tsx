@@ -48,7 +48,7 @@ export const Select = ({
   )
 
   return (
-    <div ref={rootRef} className={cn('relative w-full', className)}>
+    <div ref={rootRef} className={cn('relative overflow-visible w-full', className)}>
       <button
         type="button"
         disabled={disabled}
@@ -60,7 +60,7 @@ export const Select = ({
       </button>
 
       {open && (
-        <div className="absolute z-20 mt-2 w-full animate-scale-in rounded-xl border border-surface-700 bg-surface-800 p-2 shadow-accent">
+        <div className="absolute z-50 mt-2 w-full animate-scale-in rounded-xl border border-surface-700 bg-surface-800 p-2 shadow-accent">
           {searchable && (
             <div className="mb-2 flex items-center gap-2 rounded-lg border border-surface-700 bg-surface-900 px-3 py-2">
               <Search size={14} className="text-slate-400" />

@@ -1,4 +1,4 @@
-import type { DragEvent, MouseEvent } from 'react'
+import type { ChangeEvent, DragEvent, MouseEvent } from 'react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import ReactFlow, {
   Background,
@@ -17,7 +17,9 @@ import ReactFlow, {
 } from 'reactflow'
 import 'reactflow/dist/style.css'
 import { endpoints } from '../../api/endpoints'
-import { useToast } from '../../components/ui'
+import type { SchemaPayload } from '../../api/schemaTypes'
+import { Button, Select, useToast } from '../../components/ui'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { CanvasToolbar } from './components/CanvasToolbar'
 import { ElementsSidebar } from './components/ElementsSidebar'
 import { PropertiesPanel } from './components/PropertiesPanel'
@@ -67,14 +69,14 @@ const initialEdges: LogisticsEdge[] = [
     source: 'point-1',
     target: 'warehouse-1',
     type: 'route',
-    data: { distance: '18 км', routeLoad: 62, isSimulationActive: true },
+    data: { distance: '18 км', routeLoad: 62, isSimulationActive: true, routeMode: 'pointWarehouse' },
   },
   {
     id: 'route-2',
     source: 'warehouse-1',
     target: 'point-2',
     type: 'route',
-    data: { distance: '24 км', routeLoad: 42, isSimulationActive: true },
+    data: { distance: '24 км', routeLoad: 42, isSimulationActive: true, routeMode: 'pointWarehouse' },
   },
 ]
 
@@ -85,7 +87,8 @@ const isValidRoute = (sourceType?: string, targetType?: string) => {
   if (!sourceType || !targetType) return false
   return (
     (sourceType === 'point' && targetType === 'warehouse') ||
-    (sourceType === 'warehouse' && targetType === 'point')
+    (sourceType === 'warehouse' && targetType === 'point') ||
+    (sourceType === 'warehouse' && targetType === 'warehouse')
   )
 }
 
@@ -103,19 +106,25 @@ const ConstructorCanvas = () => {
   const [animatingTruckId, setAnimatingTruckId] = useState<string | null>(null)
   const stopTruckAnimationRef = useRef(false)
   const truckAnimationFrameRef = useRef<number | null>(null)
+  const [savedSchemas, setSavedSchemas] = useState<SchemaPayload[]>([])
+  const [selectedSchemaIndex, setSelectedSchemaIndex] = useState('0')
+  const importInputRef = useRef<HTMLInputElement | null>(null)
   const { showToast } = useToast()
   const reactFlow = useReactFlow()
+  const queryClient = useQueryClient()
 
-  const cancelTruckAnimation = useCallback(() => {
-    stopTruckAnimationRef.current = true
-    if (truckAnimationFrameRef.current !== null) {
-      cancelAnimationFrame(truckAnimationFrameRef.current)
-      truckAnimationFrameRef.current = null
-    }
-    setAnimatingTruckId(null)
-  }, [])
-
-  useEffect(() => () => cancelTruckAnimation(), [cancelTruckAnimation])
+  const schemaOptions = useMemo(
+    () =>
+      savedSchemas.map((schema, index) => ({
+        value: String(index),
+        label: schema.id
+          ? `ID: ${schema.id}`
+          : schema.updatedAt
+          ? `Обновлена ${schema.updatedAt}`
+          : `Схема ${index + 1}`,
+      })),
+    [savedSchemas],
+  )
 
   const pushSnapshot = useCallback(() => {
     setUndoStack((prev) => [...prev.slice(-29), { nodes, edges }])
@@ -133,6 +142,188 @@ const ConstructorCanvas = () => {
       })),
     [isSimulationActive],
   )
+
+  const applySchema = useCallback(
+    (schema: SchemaPayload, source: 'API' | 'local' = 'API') => {
+      pushSnapshot()
+      setNodes(
+        schema.nodes.map((node) => ({
+          id: node.id,
+          type: node.type,
+          position: node.position,
+          data: node.data as unknown as LogisticsNodeData,
+        })),
+      )
+      setEdges(
+        updateEdgeSimulationFlag(
+          schema.edges.map((edge) => ({
+            id: edge.id,
+            source: edge.source,
+            target: edge.target,
+            type: edge.type ?? 'route',
+            data: (edge.data ?? {}) as unknown as LogisticsEdge['data'],
+          })),
+        ),
+      )
+      showToast({ variant: 'success', title: `Схема загружена ${source === 'API' ? 'из API' : 'из localStorage'}` })
+    },
+    [pushSnapshot, setEdges, setNodes, showToast, updateEdgeSimulationFlag],
+  )
+
+  const loadFromLocal = useCallback(() => {
+    const raw = localStorage.getItem('logistics-schema')
+    if (!raw) {
+      showToast({ variant: 'error', title: 'Нет сохраненной схемы' })
+      return
+    }
+
+    try {
+      const local = JSON.parse(raw) as Snapshot
+      pushSnapshot()
+      setNodes(local.nodes)
+      setEdges(updateEdgeSimulationFlag(local.edges))
+      showToast({ variant: 'info', title: 'Схема загружена из localStorage' })
+    } catch {
+      showToast({ variant: 'error', title: 'Не удалось загрузить локальную схему' })
+    }
+  }, [pushSnapshot, setEdges, setNodes, showToast, updateEdgeSimulationFlag])
+
+  const schemasQuery = useQuery({
+    queryKey: ['schemas'],
+    queryFn: () => endpoints.loadSchemas(),
+    retry: false,
+  })
+
+  useEffect(() => {
+    if (schemasQuery.data) {
+      setSavedSchemas(schemasQuery.data)
+      if (schemasQuery.data.length) {
+        setSelectedSchemaIndex('0')
+        applySchema(schemasQuery.data[0], 'API')
+      } else {
+        loadFromLocal()
+      }
+    }
+  }, [schemasQuery.data, applySchema, loadFromLocal])
+
+  useEffect(() => {
+    if (schemasQuery.isError) {
+      loadFromLocal()
+    }
+  }, [schemasQuery.isError, loadFromLocal])
+
+  const isSchemasLoading = schemasQuery.isLoading
+
+  const saveSchemaMutation = useMutation<SchemaPayload, Error, SchemaPayload>({
+    mutationFn: (payload) => endpoints.saveSchema(payload),
+    onSuccess: () => {
+      showToast({ variant: 'success', title: 'Схема сохранена' })
+      queryClient.invalidateQueries({ queryKey: ['schemas'] })
+    },
+    onError: () => {
+      localStorage.setItem('logistics-schema', JSON.stringify({ nodes, edges }))
+      showToast({
+        variant: 'warning',
+        title: 'API недоступен',
+        description: 'Схема сохранена локально в браузере.',
+      })
+    },
+  })
+
+  const saveSchema = useCallback(() => {
+    saveSchemaMutation.mutate({
+      nodes: nodes.map((node) => ({
+        id: node.id,
+        type: (node.type as LogisticsNodeType) ?? 'point',
+        position: node.position,
+        data: node.data as unknown as Record<string, unknown>,
+      })),
+      edges: edges.map((edge) => ({
+        id: edge.id,
+        source: edge.source,
+        target: edge.target,
+        type: edge.type,
+        data: (edge.data ?? {}) as Record<string, unknown>,
+      })),
+    })
+  }, [edges, nodes, saveSchemaMutation])
+
+  const loadSchema = useCallback(() => {
+    if (savedSchemas.length) {
+      const index = Math.min(savedSchemas.length - 1, Math.max(0, Number(selectedSchemaIndex)))
+      const schema = savedSchemas[index]
+      if (schema) {
+        applySchema(schema, 'API')
+        return
+      }
+    }
+
+    if (isSchemasLoading) {
+      showToast({ variant: 'info', title: 'Ожидание списка схем...' })
+      return
+    }
+
+    loadFromLocal()
+  }, [applySchema, isSchemasLoading, loadFromLocal, savedSchemas, selectedSchemaIndex, showToast])
+
+  const handleExportJson = useCallback(() => {
+    const payload = { nodes, edges }
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `logistics-schema-${Date.now()}.json`
+    link.click()
+    URL.revokeObjectURL(url)
+    showToast({ variant: 'success', title: 'Схема экспортирована в JSON' })
+  }, [edges, nodes, showToast])
+
+  const handleImportJson = useCallback(
+    async (event: ChangeEvent<HTMLInputElement>) => {
+      const file = event.target.files?.[0]
+      if (!file) return
+
+      try {
+        const text = await file.text()
+        const imported = JSON.parse(text) as Snapshot
+        if (!imported.nodes || !imported.edges) {
+          throw new Error('Неправильный формат файла')
+        }
+        pushSnapshot()
+        setNodes(imported.nodes)
+        setEdges(updateEdgeSimulationFlag(imported.edges))
+        showToast({ variant: 'success', title: 'Схема импортирована из JSON' })
+      } catch {
+        showToast({ variant: 'error', title: 'Не удалось импортировать JSON-схему' })
+      } finally {
+        if (event.target) {
+          event.target.value = ''
+        }
+      }
+    },
+    [pushSnapshot, setEdges, setNodes, showToast, updateEdgeSimulationFlag],
+  )
+
+  const handleImportClick = useCallback(() => {
+    importInputRef.current?.click()
+  }, [])
+
+  useEffect(() => {
+    if (schemaOptions.length && Number(selectedSchemaIndex) >= schemaOptions.length) {
+      setSelectedSchemaIndex('0')
+    }
+  }, [schemaOptions, selectedSchemaIndex])
+
+  const cancelTruckAnimation = useCallback(() => {
+    stopTruckAnimationRef.current = true
+    if (truckAnimationFrameRef.current !== null) {
+      cancelAnimationFrame(truckAnimationFrameRef.current)
+      truckAnimationFrameRef.current = null
+    }
+    setAnimatingTruckId(null)
+  }, [])
+
+  useEffect(() => () => cancelTruckAnimation(), [cancelTruckAnimation])
 
   const validateConnection = useCallback(
     (connection: Connection) => {
@@ -152,7 +343,7 @@ const ConstructorCanvas = () => {
         showToast({
           variant: 'error',
           title: 'Невалидное соединение',
-          description: 'Разрешены только Point ↔ Warehouse.',
+          description: 'Разрешены только Point ↔ Warehouse и Warehouse ↔ Warehouse.',
         })
         return
       }
@@ -169,6 +360,10 @@ const ConstructorCanvas = () => {
                 distance: `${Math.ceil(Math.random() * 30)} км`,
                 routeLoad: Math.ceil(Math.random() * 100),
                 isSimulationActive,
+                routeMode:
+                  source?.type === 'warehouse' && target?.type === 'warehouse'
+                    ? 'warehouseWarehouse'
+                    : 'pointWarehouse',
               },
             },
             current,
@@ -282,74 +477,6 @@ const ConstructorCanvas = () => {
     })
   }, [edges, nodes, setEdges, setNodes])
 
-  const saveSchema = useCallback(async () => {
-    try {
-      await endpoints.saveSchema({
-        nodes: nodes.map((node) => ({
-          id: node.id,
-          type: (node.type as LogisticsNodeType) ?? 'point',
-          position: node.position,
-          data: node.data as unknown as Record<string, unknown>,
-        })),
-        edges: edges.map((edge) => ({
-          id: edge.id,
-          source: edge.source,
-          target: edge.target,
-          type: edge.type,
-          data: (edge.data ?? {}) as Record<string, unknown>,
-        })),
-      })
-      showToast({ variant: 'success', title: 'Схема сохранена' })
-    } catch {
-      localStorage.setItem('logistics-schema', JSON.stringify({ nodes, edges }))
-      showToast({
-        variant: 'warning',
-        title: 'API недоступен',
-        description: 'Схема сохранена локально в браузере.',
-      })
-    }
-  }, [edges, nodes, showToast])
-
-  const loadSchema = useCallback(async () => {
-    try {
-      const payload = await endpoints.loadSchemas()
-      const latest = payload[0]
-      if (!latest) throw new Error('empty')
-      pushSnapshot()
-      setNodes(
-        latest.nodes.map((node) => ({
-          id: node.id,
-          type: node.type,
-          position: node.position,
-            data: node.data as unknown as LogisticsNodeData,
-        })),
-      )
-      setEdges(
-        updateEdgeSimulationFlag(
-          latest.edges.map((edge) => ({
-            id: edge.id,
-            source: edge.source,
-            target: edge.target,
-            type: edge.type ?? 'route',
-            data: (edge.data ?? {}) as unknown as LogisticsEdge['data'],
-          })),
-        ),
-      )
-      showToast({ variant: 'success', title: 'Схема загружена из API' })
-      return
-    } catch {
-      const raw = localStorage.getItem('logistics-schema')
-      if (!raw) {
-        showToast({ variant: 'error', title: 'Нет сохраненной схемы' })
-        return
-      }
-      const local = JSON.parse(raw) as Snapshot
-      pushSnapshot()
-      setNodes(local.nodes)
-      setEdges(updateEdgeSimulationFlag(local.edges))
-      showToast({ variant: 'info', title: 'Схема загружена из localStorage' })
-    }
-  }, [pushSnapshot, setEdges, setNodes, showToast, updateEdgeSimulationFlag])
 
   const resolveTruckDestination = useCallback(
     (truck: LogisticsNode) => {
@@ -495,6 +622,11 @@ const ConstructorCanvas = () => {
     setEdges((current) => updateEdgeSimulationFlag(current))
   }, [isSimulationActive, setEdges, updateEdgeSimulationFlag])
 
+  const defaultEdgeOptions = useMemo(
+    () => ({ type: 'smoothstep', animated: false, style: { strokeWidth: 2 } }),
+    [],
+  )
+
   const connectionLineStyle = useMemo(() => ({ stroke: '#3b82f6', strokeWidth: 2 }), [])
 
   const displayNodes = useMemo(
@@ -520,6 +652,27 @@ const ConstructorCanvas = () => {
           canUndo={undoStack.length > 0}
           canRedo={redoStack.length > 0}
         />
+        <div className="flex flex-wrap items-center gap-2 border-b border-surface-700 bg-surface-900/80 px-4 py-3">
+          <div className="min-w-[220px] flex-1">
+            <Select
+              value={schemaOptions.length ? selectedSchemaIndex : ''}
+              options={schemaOptions}
+              placeholder={isSchemasLoading ? 'Загрузка схем...' : schemaOptions.length ? 'Выберите схему' : 'Сохраненных схем нет'}
+              onChange={setSelectedSchemaIndex}
+              disabled={!schemaOptions.length}
+            />
+          </div>
+          <Button variant="secondary" size="sm" onClick={loadSchema} disabled={isSchemasLoading && !schemaOptions.length}>
+            Загрузить выбранную
+          </Button>
+          <Button variant="secondary" size="sm" onClick={handleExportJson}>
+            Экспорт в JSON
+          </Button>
+          <Button variant="ghost" size="sm" onClick={handleImportClick}>
+            Импорт из JSON
+          </Button>
+          <input ref={importInputRef} type="file" accept="application/json" className="hidden" onChange={handleImportJson} />
+        </div>
         <div ref={wrapperRef} className="h-full w-full" onDrop={onDrop} onDragOver={(event) => event.preventDefault()}>
           <ReactFlow
             nodes={displayNodes}
@@ -533,6 +686,7 @@ const ConstructorCanvas = () => {
             onPaneClick={onPaneClick}
             onConnect={onConnect}
             fitView
+            defaultEdgeOptions={defaultEdgeOptions}
             isValidConnection={validateConnection}
             connectionMode={ConnectionMode.Loose}
             connectionLineStyle={connectionLineStyle}
@@ -549,7 +703,7 @@ const ConstructorCanvas = () => {
             />
             <Controls className="!border-surface-700 !bg-surface-800 !text-slate-100" />
             <Panel position="top-right" className="rounded-lg border border-surface-700 bg-surface-800/80 px-3 py-1 text-xs text-slate-300">
-              Только Point ↔ Warehouse соединения
+              Только Point ↔ Warehouse и Warehouse ↔ Warehouse соединения
             </Panel>
           </ReactFlow>
         </div>

@@ -6,5 +6,6 @@ export { Modal } from './Modal'
 export { Select } from './Select'
 export { Slider } from './Slider'
 export { Tabs } from './Tabs'
+export { HelpTooltip } from './HelpTooltip'
 export { ToastProvider, useToast } from './Toast'  //сомнительно но допустим я добавлю
 export type { TabItem } from './Tabs'

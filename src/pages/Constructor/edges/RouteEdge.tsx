@@ -1,4 +1,4 @@
-import { BaseEdge, EdgeLabelRenderer, getBezierPath, type EdgeProps } from 'reactflow'
+import { BaseEdge, EdgeLabelRenderer, getSmoothStepPath, type EdgeProps } from 'reactflow'
 import { cn } from '../../../utils/cn'
 import type { RouteEdgeData } from '../types'
 
@@ -18,17 +18,21 @@ export const RouteEdge = ({
   targetPosition,
   data,
 }: EdgeProps<RouteEdgeData>) => {
-  const [path, labelX, labelY] = getBezierPath({
+  const [path, labelX, labelY] = getSmoothStepPath({
     sourceX,
     sourceY,
     targetX,
     targetY,
     sourcePosition,
     targetPosition,
+    offset: 18,
+    borderRadius: 12,
   })
 
   const routeLoad = data?.routeLoad ?? 0
   const stroke = getEdgeColor(routeLoad)
+
+  const isWarehouseRoute = data?.routeMode === 'warehouseWarehouse'
 
   return (
     <>
@@ -37,8 +41,8 @@ export const RouteEdge = ({
         path={path}
         style={{
           stroke,
-          strokeWidth: 2,
-          strokeDasharray: '8 6',
+          strokeWidth: isWarehouseRoute ? 4 : 2,
+          strokeDasharray: isWarehouseRoute ? undefined : '8 6',
           animation: data?.isSimulationActive ? 'dashdraw 0.9s linear infinite' : undefined,
         }}
       />

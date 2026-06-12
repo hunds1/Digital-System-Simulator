@@ -22,6 +22,7 @@ export interface RouteEdgeData {
   distance: string
   routeLoad: number
   isSimulationActive: boolean
+  routeMode?: 'pointWarehouse' | 'warehouseWarehouse'
 }
 
 export type LogisticsNode = Node<LogisticsNodeData>

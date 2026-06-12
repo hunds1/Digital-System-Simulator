@@ -3,8 +3,9 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from 'react
 import type { ColDef } from 'ag-grid-community'
 import { endpoints } from '../../api/endpoints'
 import type { SimulationResult } from '../../api/schemaTypes'
-import { Badge, Button, Card, Tabs, useToast } from '../../components/ui'
+import { Badge, Button, Card, HelpTooltip, Tabs, useToast } from '../../components/ui'
 import { useSimulationRunStore } from '../../store/simulationRunStore'
+import { useSettingsStore } from '../../store/settingsStore'
 
 const ResultsOverviewCharts = lazy(() =>
   import('./components/ResultsOverviewCharts').then((module) => ({ default: module.ResultsOverviewCharts })),
@@ -66,6 +67,7 @@ const mockResult = (id: string): SimulationResult => ({
 export const ResultsPage = () => {
   const { showToast } = useToast()
   const { selectedParameters, setSelectedParameters, history, addHistoryItem } = useSimulationRunStore()
+  const { systemName, calculationMode, intensity } = useSettingsStore()
   const [runState, setRunState] = useState<RunState>('idle')
   const [progress, setProgress] = useState(0)
   const [currentStep, setCurrentStep] = useState(progressSteps[0])
@@ -139,7 +141,12 @@ export const ResultsPage = () => {
     try {
       const start = await endpoints.startSimulation({
         mode: (parametersSummary.planningMode as 'strict' | 'multiagent') ?? 'strict',
-        parameters: parametersSummary,
+        parameters: {
+          ...parametersSummary,
+          systemName,
+          calculationMode,
+          intensity,
+        },
       })
       simulationId = start.id
     } catch {
@@ -378,10 +385,30 @@ export const ResultsPage = () => {
                   <table className="w-full min-w-[680px] text-sm">
                     <thead>
                       <tr className="border-b border-surface-700 text-left text-slate-400">
-                        <th className="pb-2">Метрика</th>
-                        <th className="pb-2">Жесткое</th>
-                        <th className="pb-2">Мультиагент</th>
-                        <th className="pb-2">Разница</th>
+                        <th className="pb-2">
+                          <div className="inline-flex items-center gap-2">
+                            Метрика
+                            <HelpTooltip text="Показатель сравнения эффективности разных режимов симуляции." />
+                          </div>
+                        </th>
+                        <th className="pb-2">
+                          <div className="inline-flex items-center gap-2">
+                            Жесткое
+                            <HelpTooltip text="Результат для жёсткого (strict) режима планирования." />
+                          </div>
+                        </th>
+                        <th className="pb-2">
+                          <div className="inline-flex items-center gap-2">
+                            Мультиагент
+                            <HelpTooltip text="Результат для мультиагентного (multiagent) режима планирования." />
+                          </div>
+                        </th>
+                        <th className="pb-2">
+                          <div className="inline-flex items-center gap-2">
+                            Разница
+                            <HelpTooltip text="Разница между мультиагентным и жёстким режимами." />
+                          </div>
+                        </th>
                       </tr>
                     </thead>
                     <tbody>
