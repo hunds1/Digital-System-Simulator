@@ -1,6 +1,7 @@
-import { Dices, RefreshCcw, Save, Settings2 } from 'lucide-react'
+import { Dices, Network, RefreshCcw, Save, Settings2 } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { Badge, Button, Card, HelpTooltip, Input, Modal, Select, Slider } from '../../components/ui'
+import type { NetworkSchema } from '../../api/schemaTypes'
 
 type DistanceDistribution = 'uniform' | 'normal' | 'poisson'
 type OptimizationType = 'cost' | 'profit'
@@ -39,6 +40,7 @@ interface PresetItem {
 
 const STORAGE_KEY = 'simulation-config-v1'
 const PRESETS_KEY = 'simulation-presets-v1'
+const USE_NETWORK_KEY = 'simulation-use-network'
 
 const defaults: SimulationConfig = {
   orders: 1000,
@@ -124,6 +126,60 @@ const getSchemaPoints = () => {
   }
 }
 
+/**
+ * Extracts the full logistics network from localStorage and computes
+ * Euclidean distances for each edge. Returns null if no schema is saved.
+ */
+export const getNetworkSchema = (): NetworkSchema | null => {
+  const raw = localStorage.getItem('logistics-schema')
+  if (!raw) return null
+
+  try {
+    const parsed = JSON.parse(raw) as {
+      nodes?: Array<Record<string, any>>
+      edges?: Array<Record<string, any>>
+    }
+    const nodes = Array.isArray(parsed) ? parsed : Array.isArray(parsed.nodes) ? parsed.nodes : []
+    const edges = Array.isArray(parsed.edges) ? parsed.edges : []
+
+    if (!nodes.length) return null
+
+    const points = nodes
+      .filter((n) => typeof n?.type === 'string')
+      .map((n) => ({
+        id: String(n.id ?? ''),
+        label: n?.data?.label ?? n.id ?? 'Без названия',
+        type: (String(n.type).toLowerCase() === 'warehouse' ? 'warehouse' : 'point') as 'point' | 'warehouse',
+        x: n?.position?.x ?? 0,
+        y: n?.position?.y ?? 0,
+      }))
+
+    const posMap: Record<string, { x: number; y: number }> = {}
+    for (const n of nodes) {
+      if (n?.id && n?.position) {
+        posMap[String(n.id)] = { x: n.position.x ?? 0, y: n.position.y ?? 0 }
+      }
+    }
+
+    const networkEdges = edges
+      .filter((e) => e?.source && e?.target)
+      .map((e) => {
+        const s = posMap[String(e.source)]
+        const t = posMap[String(e.target)]
+        const dist = s && t ? Math.sqrt((s.x - t.x) ** 2 + (s.y - t.y) ** 2) : 50
+        return {
+          source: String(e.source),
+          target: String(e.target),
+          distance: Math.round(dist),
+        }
+      })
+
+    return { points, edges: networkEdges }
+  } catch {
+    return null
+  }
+}
+
 const SchemaPointsList = () => {
   const [items, setItems] = useState<Array<{
     id: string
@@ -186,6 +242,11 @@ export const SimulationPage = () => {
   const [selectedPreset, setSelectedPreset] = useState('')
   const [isPresetModalOpen, setIsPresetModalOpen] = useState(false)
   const [presetName, setPresetName] = useState('')
+  const [useNetwork, setUseNetwork] = useState(() => {
+    const stored = localStorage.getItem(USE_NETWORK_KEY)
+    return stored !== 'false'
+  })
+  const networkSchema = useMemo(() => getNetworkSchema(), [])
 
   useEffect(() => {
     const stored = localStorage.getItem(STORAGE_KEY)
@@ -205,6 +266,10 @@ export const SimulationPage = () => {
       }
     }
   }, [])
+
+  useEffect(() => {
+    localStorage.setItem(USE_NETWORK_KEY, String(useNetwork))
+  }, [useNetwork])
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(config))
@@ -315,6 +380,51 @@ export const SimulationPage = () => {
       )}
 
       <SchemaPointsList />
+
+      {/* Network topology card */}
+      {networkSchema && (
+        <Card variant="glass" title="Сеть из конструктора" className="space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <Network size={20} className="text-primary-400" />
+              <div>
+                <p className="text-sm font-semibold text-slate-100">
+                  Сеть из {networkSchema.points.length} пунктов и {networkSchema.edges.length} маршрутов
+                </p>
+                <p className="text-xs text-slate-500">
+                  Топология из конструктора логистической сети
+                </p>
+              </div>
+            </div>
+            <Toggle
+              label="Использовать схему"
+              checked={useNetwork}
+              onChange={setUseNetwork}
+            />
+          </div>
+          {useNetwork && (
+            <div className="flex flex-wrap gap-2">
+              {networkSchema.points.slice(0, 8).map((p) => (
+                <span
+                  key={p.id}
+                  className={`rounded-full px-2.5 py-1 text-xs ${
+                    p.type === 'warehouse'
+                      ? 'bg-warning/20 text-warning'
+                      : 'bg-primary-500/20 text-primary-300'
+                  }`}
+                >
+                  {p.label}
+                </span>
+              ))}
+              {networkSchema.points.length > 8 && (
+                <span className="rounded-full bg-surface-800 px-2.5 py-1 text-xs text-slate-400">
+                  +{networkSchema.points.length - 8}
+                </span>
+              )}
+            </div>
+          )}
+        </Card>
+      )}
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-5">
         <div className="space-y-4 xl:col-span-3">
