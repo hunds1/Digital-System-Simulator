@@ -117,6 +117,7 @@ const ConstructorCanvas = () => {
   const { showToast } = useToast()
   const reactFlowInstance = useRef<any>(null)
   const queryClient = useQueryClient()
+  const hasAttemptedLoadRef = useRef(false)
 
   const schemaOptions = useMemo(
     () =>
@@ -148,10 +149,12 @@ const ConstructorCanvas = () => {
     [isSimulationActive],
   )
 
-  const loadFromLocal = useCallback(() => {
+  const loadFromLocal = useCallback((silent = false) => {
     const raw = localStorage.getItem('logistics-schema')
     if (!raw) {
-      showToast({ variant: 'error', title: 'Нет сохраненной схемы' })
+      if (!silent) {
+        showToast({ variant: 'error', title: 'Нет сохраненной схемы' })
+      }
       return
     }
 
@@ -165,6 +168,9 @@ const ConstructorCanvas = () => {
       showToast({ variant: 'error', title: 'Не удалось загрузить локальную схему' })
     }
   }, [pushSnapshot, setEdges, setNodes, showToast, updateEdgeSimulationFlag])
+
+  /** Silent version for automatic fallback (no toast spam) */
+  const loadFromLocalSilent = useCallback(() => loadFromLocal(true), [loadFromLocal])
 
   const applySchema = useCallback(
     (schema: SchemaPayload | undefined, source: 'API' | 'local' = 'API') => {
@@ -226,15 +232,15 @@ const ConstructorCanvas = () => {
         loadFromLocal()
       }
     } else {
-      loadFromLocal()
+      loadFromLocalSilent()
     }
-  }, [schemasQuery.data, applySchema, loadFromLocal])
+  }, [schemasQuery.data, applySchema, loadFromLocalSilent])
 
   useEffect(() => {
     if (schemasQuery.isError) {
-      loadFromLocal()
+      loadFromLocalSilent()
     }
-  }, [schemasQuery.isError, loadFromLocal])
+  }, [schemasQuery.isError, loadFromLocalSilent])
 
   const isSchemasLoading = schemasQuery.isLoading
 

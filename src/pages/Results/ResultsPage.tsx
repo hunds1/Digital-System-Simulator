@@ -1,11 +1,12 @@
-import {   Activity,  BarChart3,  CheckCircle2,  ChevronLeft,  ChevronRight,  Clock3,  Loader2,  Play,  Save,  Truck } from 'lucide-react'
-import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from 'react'
+import {   Activity,  BarChart3,  CheckCircle2,  ChevronLeft,  ChevronRight,  Clock3,  Loader2,  Pause,  Play,  Save,  Truck } from 'lucide-react'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ColDef } from 'ag-grid-community'
 import { endpoints } from '../../api/endpoints'
-import type { SimulationResult } from '../../api/schemaTypes'
+import { adaptHeatmap, type HeatmapCell, type SimulationResult } from '../../api/schemaTypes'
 import { Badge, Button, Card, HelpTooltip, Tabs, useToast } from '../../components/ui'
 import { useSimulationRunStore } from '../../store/simulationRunStore'
 import { useSettingsStore } from '../../store/settingsStore'
+import { getNetworkSchema } from '../Simulation/SimulationPage'
 
 const ResultsOverviewCharts = lazy(() =>
   import('./components/ResultsOverviewCharts').then((module) => ({ default: module.ResultsOverviewCharts })),
@@ -15,7 +16,7 @@ const ResultsFleetGrid = lazy(() =>
 )
 
 type RunState = 'idle' | 'running' | 'completed'
-type WsStatus = 'connected' | 'reconnecting'
+type WsStatus = 'connected' | 'reconnecting' | 'done'
 
 const SIM_CONFIG_KEY = 'simulation-config-v1'
 const progressSteps = ['Генерация заказов...', 'Распределение...', 'Расчет метрик...']
@@ -57,9 +58,9 @@ const mockResult = (id: string): SimulationResult => ({
     mileage: 100 + Math.round(Math.random() * 220),
   })),
   heatmap: Array.from({ length: 30 }, (_, index) => ({
-    point: `P-${(index % 6) + 1}`,
-    truck: `TR-${Math.floor(index / 6) + 1}`,
-    orders: Math.round(Math.random() * 12),
+    x: index % 6,
+    y: Math.floor(index / 6),
+    value: Math.round(Math.random() * 12),
   })),
   createdAt: new Date().toISOString(),
 })
@@ -76,17 +77,28 @@ export const ResultsPage = () => {
   const [activeResult, setActiveResult] = useState<SimulationResult | null>(null)
   const [historyOpen, setHistoryOpen] = useState(true)
   const [activeTab, setActiveTab] = useState('overview')
+  const [isPaused, setIsPaused] = useState(false)
+  const socketRef = useRef<WebSocket | null>(null)
 
   const parametersSummary = useMemo(() => {
-    if (Object.keys(selectedParameters).length) return selectedParameters
+    // Always read FRESH config from localStorage (SimulationPage writes here on every change)
     const localRaw = localStorage.getItem(SIM_CONFIG_KEY)
-    if (!localRaw) return {}
-    try {
-      return JSON.parse(localRaw) as Record<string, unknown>
-    } catch {
-      return {}
+    let params: Record<string, unknown> = {}
+    if (localRaw) {
+      try {
+        params = JSON.parse(localRaw) as Record<string, unknown>
+      } catch {
+        // ignore
+      }
     }
-  }, [selectedParameters])
+    // Merge settings store values (Settings page: systemName, calculationMode, intensity)
+    return {
+      ...params,
+      systemName,
+      calculationMode,
+      intensity,
+    }
+  }, [systemName, calculationMode, intensity])
 
   useEffect(() => {
     if (Object.keys(parametersSummary).length) {
@@ -130,23 +142,44 @@ export const ResultsPage = () => {
     URL.revokeObjectURL(url)
   }, [activeResult])
 
+  const handlePause = useCallback(() => {
+    if (socketRef.current?.readyState === WebSocket.OPEN) {
+      socketRef.current.send(JSON.stringify({ type: 'PAUSE' }))
+      setIsPaused(true)
+    }
+  }, [])
+
+  const handleResume = useCallback(() => {
+    if (socketRef.current?.readyState === WebSocket.OPEN) {
+      socketRef.current.send(JSON.stringify({ type: 'RESUME' }))
+      setIsPaused(false)
+    }
+  }, [])
+
   const startSimulation = useCallback(async () => {
     setRunState('running')
     setProgress(0)
     setCurrentStep(progressSteps[0])
     setElapsed(0)
     setWsStatus('reconnecting')
+    setIsPaused(false)
 
-    let simulationId = `local-${Date.now()}`
+    // 1. POST parameters to backend to get simulation ID
+    let simulationId: string
+    const useNetworkToggle = localStorage.getItem('simulation-use-network') !== 'false'
+    const network = useNetworkToggle ? getNetworkSchema() : null
     try {
+      const { planningMode, ...restParams } = parametersSummary as Record<string, unknown>
       const start = await endpoints.startSimulation({
-        mode: (parametersSummary.planningMode as 'strict' | 'multiagent') ?? 'strict',
+        mode: (planningMode as 'strict' | 'multiagent') ?? 'strict',
         parameters: {
-          ...parametersSummary,
+          ...restParams,
+          planningMode,
           systemName,
           calculationMode,
           intensity,
         },
+        network,
       })
       simulationId = start.id
     } catch {
@@ -155,53 +188,98 @@ export const ResultsPage = () => {
         title: 'API недоступен',
         description: 'Запуск продолжается в демо-режиме.',
       })
+      // Fallback: demo mode with mock result
+      const demoId = `local-${Date.now()}`
+      const progressTimer = window.setInterval(() => {
+        setProgress((prev) => {
+          const next = Math.min(100, prev + 7)
+          if (next < 35) setCurrentStep(progressSteps[0])
+          else if (next < 75) setCurrentStep(progressSteps[1])
+          else setCurrentStep(progressSteps[2])
+          return next
+        })
+      }, 420)
+      window.setTimeout(() => {
+        window.clearInterval(progressTimer)
+        const result = mockResult(demoId)
+        setActiveResult(result)
+        addHistoryItem({
+          id: result.id,
+          date: new Date(result.createdAt).toLocaleString('ru-RU'),
+          mode: result.mode,
+          completionPercent: result.completionPercent,
+          miniSeries: result.timeline.map((item) => item.completed),
+          result,
+        })
+        setRunState('completed')
+        showToast({ variant: 'success', title: 'Симуляция завершена (демо)' })
+      }, 6200)
+      return
     }
 
-    let socket: WebSocket | null = null
-    try {
-      const wsBase = (import.meta.env.VITE_WS_BASE_URL as string | undefined) ?? 'ws://localhost:3000/ws'
-      socket = new WebSocket(`${wsBase}/simulations/${simulationId}`)
-      socket.onopen = () => setWsStatus('connected')
-      socket.onerror = () => setWsStatus('reconnecting')
-      socket.onclose = () => setWsStatus('reconnecting')
-    } catch {
-      setWsStatus('reconnecting')
+    // 2. Open WebSocket for real-time tick streaming
+    const wsBase = (import.meta.env.VITE_WS_BASE_URL as string | undefined) ?? 'ws://localhost:3001/ws/simulation'
+    const socket = new WebSocket(`${wsBase}/${simulationId}`)
+    socketRef.current = socket
+
+    socket.onopen = () => {
+      setWsStatus('connected')
+      // Send INIT message with parameters + network so the WS engine uses real topology
+      const { planningMode, ...restParams } = parametersSummary as Record<string, unknown>
+      socket.send(JSON.stringify({
+        type: 'INIT',
+        parameters: {
+          ...restParams,
+          planningMode,
+          systemName,
+          calculationMode,
+          intensity,
+        },
+        network,
+      }))
     }
 
-    const progressTimer = window.setInterval(() => {
-      setProgress((prev) => {
-        const next = Math.min(100, prev + 7)
-        if (next < 35) setCurrentStep(progressSteps[0])
-        else if (next < 75) setCurrentStep(progressSteps[1])
-        else setCurrentStep(progressSteps[2])
-        return next
-      })
-    }, 420)
-
-    const finish = async () => {
-      window.clearInterval(progressTimer)
-      let result: SimulationResult
+    socket.onmessage = (event) => {
+      let msg: Record<string, unknown>
       try {
-        result = await endpoints.getSimulationResult(simulationId)
+        msg = JSON.parse(event.data as string)
       } catch {
-        result = mockResult(simulationId)
+        return
       }
-      setActiveResult(result)
-      addHistoryItem({
-        id: result.id,
-        date: new Date(result.createdAt).toLocaleString('ru-RU'),
-        mode: result.mode,
-        completionPercent: result.completionPercent,
-        miniSeries: result.timeline.map((item) => item.completed),
-        result,
-      })
-      setRunState('completed')
-      socket?.close()
-      showToast({ variant: 'success', title: 'Симуляция завершена' })
+
+      if (msg.type === 'TICK') {
+        const hour = msg.hour as number
+        const totalHours = 8
+        const pct = Math.min(99, Math.round((hour / totalHours) * 100))
+        setProgress(pct)
+        if (pct < 35) setCurrentStep(progressSteps[0])
+        else if (pct < 75) setCurrentStep(progressSteps[1])
+        else setCurrentStep(progressSteps[2])
+      } else if (msg.type === 'COMPLETE') {
+        const data = msg.data as SimulationResult
+        setWsStatus('done')
+        socket.close()
+        setProgress(100)
+        setActiveResult(data)
+        addHistoryItem({
+          id: data.id,
+          date: new Date(data.createdAt).toLocaleString('ru-RU'),
+          mode: data.mode,
+          completionPercent: data.completionPercent,
+          miniSeries: data.timeline.map((item) => item.completed),
+          result: data,
+        })
+        setRunState('completed')
+        showToast({ variant: 'success', title: 'Симуляция завершена' })
+      }
     }
 
-    window.setTimeout(finish, 6200)
-  }, [addHistoryItem, parametersSummary, showToast, setSelectedParameters])
+    socket.onerror = () => setWsStatus('reconnecting')
+    socket.onclose = () => {
+      setWsStatus((prev) => (prev === 'done' ? 'done' : 'reconnecting'))
+      socketRef.current = null
+    }
+  }, [addHistoryItem, parametersSummary, showToast, systemName, calculationMode, intensity])
 
   const comparisonRows = useMemo(() => {
     if (!activeResult) return []
@@ -245,8 +323,8 @@ export const ResultsPage = () => {
     <section className="space-y-4">
       <div className="flex items-center justify-between">
         <h2 className="text-2xl font-semibold">Запуск и результаты симуляции</h2>
-        <Badge variant={wsStatus === 'connected' ? 'success' : 'warning'}>
-          {wsStatus === 'connected' ? 'Подключен ✓' : 'Переподключение...'}
+        <Badge variant={wsStatus === 'connected' ? 'success' : wsStatus === 'done' ? 'success' : 'warning'}>
+          {wsStatus === 'connected' ? 'Подключен ✓' : wsStatus === 'done' ? 'Завершено ✓' : 'Переподключение...'}
         </Badge>
       </div>
 
@@ -316,15 +394,39 @@ export const ResultsPage = () => {
               </Card>
 
               <Card variant="glass" hoverable={false} className="space-y-4">
+                <div className="flex gap-3">
+                  {runState === 'running' && !isPaused && (
+                  <Button
+                    size="lg"
+                    variant="secondary"
+                    leftIcon={Pause}
+                    onClick={handlePause}
+                    className="flex-1"
+                  >
+                    ⏸ Пауза
+                  </Button>
+                )}
+                {runState === 'running' && isPaused && (
+                  <Button
+                    size="lg"
+                    variant="secondary"
+                    leftIcon={Play}
+                    onClick={handleResume}
+                    className="flex-1"
+                  >
+                    ▶ Продолжить
+                  </Button>
+                )}
                 <Button
                   size="lg"
                   loading={runState === 'running'}
                   leftIcon={Play}
                   onClick={startSimulation}
-                  className="w-full animate-pulse-glow"
+                  className="flex-1 animate-pulse-glow"
                 >
                   ▶ Запустить
-                </Button>
+                  </Button>
+                </div>
                 <div>
                   <div className="mb-2 flex items-center justify-between text-sm">
                     <span className="text-slate-300">{currentStep}</span>
@@ -448,7 +550,7 @@ export const ResultsPage = () => {
                 <Card variant="glass" title="Распределение по пунктам (Пункты × Грузовики)" action={<Button size="sm" leftIcon={Save} onClick={handleSaveReport}>Сохранить отчет</Button>} hoverable={false}>
                   <div className="overflow-x-auto">
                     <div className="grid min-w-[720px] grid-cols-6 gap-2">
-                      {activeResult.heatmap.map((cell, index) => (
+                      {adaptHeatmap(activeResult.heatmap, activeResult.pointLabels).map((cell: HeatmapCell, index: number) => (
                         <div
                           key={`${cell.point}-${cell.truck}-${index}`}
                           className="rounded-md border border-surface-700 p-2 text-xs"
